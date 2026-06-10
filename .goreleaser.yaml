@@ -14,17 +14,5 @@ archives:
   - format: tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
-brews:
-  - repository:
-      owner: mattogodoy
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    name: hangar
-    homepage: "https://github.com/mattogodoy/hangar"
-    description: "Persist and restore AeroSpace window layouts"
-    license: "MIT"
-    install: |
-      bin.install "hangar"
-
 changelog:
   sort: asc
