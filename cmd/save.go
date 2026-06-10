@@ -42,10 +42,12 @@ var saveCmd = &cobra.Command{
 		var entries []profile.WindowEntry
 		for _, w := range windows {
 			entries = append(entries, profile.WindowEntry{
-				AppName:   w.AppName,
-				AppBundle: w.AppBundle,
-				Title:     w.WindowTitle,
-				Workspace: w.Workspace,
+				AppName:               w.AppName,
+				AppBundle:             w.AppBundle,
+				Title:                 w.WindowTitle,
+				Workspace:             w.Workspace,
+				ParentContainerLayout: w.ParentContainerLayout,
+				RootContainerLayout:   w.RootContainerLayout,
 			})
 		}
 

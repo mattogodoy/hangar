@@ -4,15 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 type Window struct {
-	AppName    string `json:"app-name"`
-	AppBundle  string `json:"app-bundle-id"`
-	WindowID   int    `json:"window-id"`
-	WindowTitle string `json:"window-title"`
-	Workspace  string `json:"workspace"`
-	MonitorName string `json:"monitor-name"`
+	AppName               string `json:"app-name"`
+	AppBundle             string `json:"app-bundle-id"`
+	WindowID              int    `json:"window-id"`
+	WindowTitle           string `json:"window-title"`
+	Workspace             string `json:"workspace"`
+	MonitorName           string `json:"monitor-name"`
+	WindowLayout          string `json:"window-layout"`
+	ParentContainerLayout string `json:"window-parent-container-layout"`
+	RootContainerLayout   string `json:"workspace-root-container-layout"`
 }
 
 type Monitor struct {
@@ -40,7 +44,7 @@ func run(args ...string) ([]byte, error) {
 func ListWindows() ([]Window, error) {
 	out, err := run(
 		"list-windows", "--all", "--json",
-		"--format", "%{window-id} %{app-name} %{app-bundle-id} %{window-title} %{workspace} %{monitor-name}",
+		"--format", "%{window-id} %{app-name} %{app-bundle-id} %{window-title} %{workspace} %{monitor-name} %{window-layout} %{window-parent-container-layout} %{workspace-root-container-layout}",
 	)
 	if err != nil {
 		return nil, err
@@ -86,5 +90,41 @@ func MoveWorkspaceToMonitor(workspace, monitorPattern string) error {
 
 func MoveWindowToWorkspace(windowID int, workspace string) error {
 	_, err := run("move-node-to-workspace", "--window-id", fmt.Sprintf("%d", windowID), workspace)
+	return err
+}
+
+func SetLayout(windowID int, layout string) error {
+	cmd := exec.Command("aerospace", "layout", "--window-id", fmt.Sprintf("%d", windowID), layout)
+	_, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if stderr == "" {
+				return nil
+			}
+			return fmt.Errorf("layout %s for window %d: %s", layout, windowID, stderr)
+		}
+		return err
+	}
+	return nil
+}
+
+func JoinWith(windowID int, direction string) error {
+	_, err := run("join-with", "--window-id", fmt.Sprintf("%d", windowID), direction)
+	return err
+}
+
+func TryJoinWith(windowID int, directions ...string) error {
+	for _, dir := range directions {
+		err := JoinWith(windowID, dir)
+		if err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("join-with failed for window %d in all directions", windowID)
+}
+
+func FlattenWorkspaceTree(workspace string) error {
+	_, err := run("flatten-workspace-tree", "--workspace", workspace)
 	return err
 }

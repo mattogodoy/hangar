@@ -11,10 +11,12 @@ import (
 )
 
 type WindowEntry struct {
-	AppName   string `json:"app_name"`
-	AppBundle string `json:"app_bundle_id"`
-	Title     string `json:"title"`
-	Workspace string `json:"workspace"`
+	AppName               string `json:"app_name"`
+	AppBundle             string `json:"app_bundle_id"`
+	Title                 string `json:"title"`
+	Workspace             string `json:"workspace"`
+	ParentContainerLayout string `json:"parent_container_layout"`
+	RootContainerLayout   string `json:"root_container_layout"`
 }
 
 type MonitorLayout struct {

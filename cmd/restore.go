@@ -9,6 +9,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type matchedWindow struct {
+	saved   profile.WindowEntry
+	current aerospace.Window
+}
+
 var restoreCmd = &cobra.Command{
 	Use:   "restore <profile-name>",
 	Short: "Restore a saved window layout",
@@ -44,14 +49,14 @@ var restoreCmd = &cobra.Command{
 		}
 		fmt.Println("Restored workspace-to-monitor assignments")
 
-		// Phase 2: restore window-to-workspace assignments
+		// Phase 2: match saved windows to current windows
 		currentWindows, err := aerospace.ListWindows()
 		if err != nil {
 			return fmt.Errorf("listing current windows: %w", err)
 		}
 
 		claimed := make(map[int]bool)
-		moved := 0
+		var matches []matchedWindow
 		skipped := 0
 
 		for _, saved := range p.Windows {
@@ -61,19 +66,152 @@ var restoreCmd = &cobra.Command{
 				continue
 			}
 			claimed[best.WindowID] = true
-			if best.Workspace == saved.Workspace {
-				continue
-			}
-			if err := aerospace.MoveWindowToWorkspace(best.WindowID, saved.Workspace); err != nil {
-				fmt.Printf("  warn: %s (%d) -> workspace %s: %v\n", best.AppName, best.WindowID, saved.Workspace, err)
-				continue
-			}
-			moved++
+			matches = append(matches, matchedWindow{saved: saved, current: *best})
 		}
 
-		fmt.Printf("Restored %d windows (%d saved windows had no current match)\n", moved, skipped)
+		// Phase 3: move windows to their saved workspaces
+		moved := 0
+		for _, m := range matches {
+			if m.current.Workspace != m.saved.Workspace {
+				if err := aerospace.MoveWindowToWorkspace(m.current.WindowID, m.saved.Workspace); err != nil {
+					fmt.Printf("  warn: %s (%d) -> workspace %s: %v\n", m.current.AppName, m.current.WindowID, m.saved.Workspace, err)
+					continue
+				}
+				moved++
+			}
+		}
+		fmt.Printf("Moved %d windows (%d saved windows had no current match)\n", moved, skipped)
+
+		// Phase 4: restore layout tree per workspace
+		wsWindows := make(map[string][]matchedWindow)
+		for _, m := range matches {
+			wsWindows[m.saved.Workspace] = append(wsWindows[m.saved.Workspace], m)
+		}
+
+		for ws, mws := range wsWindows {
+			if err := restoreWorkspaceLayout(ws, mws); err != nil {
+				fmt.Printf("  warn: layout for workspace %s: %v\n", ws, err)
+			}
+		}
+		fmt.Println("Restored workspace layouts")
+
 		return nil
 	},
+}
+
+func restoreWorkspaceLayout(workspace string, matches []matchedWindow) error {
+	if len(matches) == 0 {
+		return nil
+	}
+
+	if err := aerospace.FlattenWorkspaceTree(workspace); err != nil {
+		return fmt.Errorf("flatten: %w", err)
+	}
+
+	rootLayout := matches[0].saved.RootContainerLayout
+	if rootLayout == "" {
+		return nil
+	}
+
+	// Separate floating windows — they're handled last
+	var tiling []matchedWindow
+	var floating []matchedWindow
+	for _, m := range matches {
+		if m.saved.ParentContainerLayout == "floating" {
+			floating = append(floating, m)
+		} else {
+			tiling = append(tiling, m)
+		}
+	}
+
+	// Set root container layout
+	if len(tiling) > 0 {
+		if err := aerospace.SetLayout(tiling[0].current.WindowID, rootLayout); err != nil {
+			return fmt.Errorf("set root layout: %w", err)
+		}
+	}
+
+	// Find groups of consecutive windows with a different parent layout (sub-containers).
+	type subGroup struct {
+		windowIDs []int
+		layout    string
+	}
+	var groups []subGroup
+	var currentGroup *subGroup
+
+	for _, m := range tiling {
+		parentLayout := m.saved.ParentContainerLayout
+		if parentLayout == rootLayout {
+			if currentGroup != nil {
+				groups = append(groups, *currentGroup)
+				currentGroup = nil
+			}
+			continue
+		}
+		if currentGroup != nil && currentGroup.layout == parentLayout {
+			currentGroup.windowIDs = append(currentGroup.windowIDs, m.current.WindowID)
+		} else {
+			if currentGroup != nil {
+				groups = append(groups, *currentGroup)
+			}
+			currentGroup = &subGroup{
+				windowIDs: []int{m.current.WindowID},
+				layout:    parentLayout,
+			}
+		}
+	}
+	if currentGroup != nil {
+		groups = append(groups, *currentGroup)
+	}
+
+	// Reconstruct sub-containers using join-with.
+	// After flatten, windows are children of the root in tree order.
+	// join-with creates a new parent container for a window and its neighbor.
+	// We try both axis directions since visual position isn't guaranteed.
+	for _, g := range groups {
+		if len(g.windowIDs) < 2 {
+			if err := aerospace.SetLayout(g.windowIDs[0], g.layout); err != nil {
+				fmt.Printf("  warn: layout for window %d: %v\n", g.windowIDs[0], err)
+			}
+			continue
+		}
+
+		directions := joinDirections(rootLayout)
+
+		// Join the first window with its neighbor to create a sub-container
+		if err := aerospace.TryJoinWith(g.windowIDs[0], directions...); err != nil {
+			fmt.Printf("  warn: %v\n", err)
+			continue
+		}
+
+		// Join remaining windows into the sub-container
+		for _, wid := range g.windowIDs[2:] {
+			if err := aerospace.TryJoinWith(wid, directions...); err != nil {
+				fmt.Printf("  warn: %v\n", err)
+			}
+		}
+
+		// Set the sub-container's layout
+		if err := aerospace.SetLayout(g.windowIDs[0], g.layout); err != nil {
+			fmt.Printf("  warn: sub-container layout: %v\n", err)
+		}
+	}
+
+	// Handle floating windows
+	for _, m := range floating {
+		if err := aerospace.SetLayout(m.current.WindowID, "floating"); err != nil {
+			fmt.Printf("  warn: float window %d: %v\n", m.current.WindowID, err)
+		}
+	}
+
+	return nil
+}
+
+func joinDirections(rootLayout string) []string {
+	if strings.HasPrefix(rootLayout, "v_") {
+		return []string{"up", "down"}
+	}
+	return []string{"left", "right"}
 }
 
 func findBestMatch(current []aerospace.Window, saved profile.WindowEntry, claimed map[int]bool) *aerospace.Window {
