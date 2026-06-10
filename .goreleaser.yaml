@@ -1,0 +1,29 @@
+version: 2
+
+builds:
+  - binary: hangar
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - repository:
+      owner: mattogodoy
+      name: homebrew-tap
+    name: hangar
+    homepage: "https://github.com/mattogodoy/hangar"
+    description: "Persist and restore AeroSpace window layouts"
+    license: "MIT"
+    install: |
+      bin.install "hangar"
+
+changelog:
+  sort: asc
