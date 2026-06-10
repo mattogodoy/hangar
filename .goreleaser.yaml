@@ -18,6 +18,7 @@ brews:
   - repository:
       owner: mattogodoy
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     name: hangar
     homepage: "https://github.com/mattogodoy/hangar"
     description: "Persist and restore AeroSpace window layouts"
