@@ -10,13 +10,21 @@ import (
 	"time"
 )
 
+type WindowFrame struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	W float64 `json:"w"`
+	H float64 `json:"h"`
+}
+
 type WindowEntry struct {
-	AppName               string `json:"app_name"`
-	AppBundle             string `json:"app_bundle_id"`
-	Title                 string `json:"title"`
-	Workspace             string `json:"workspace"`
-	ParentContainerLayout string `json:"parent_container_layout"`
-	RootContainerLayout   string `json:"root_container_layout"`
+	AppName               string       `json:"app_name"`
+	AppBundle             string       `json:"app_bundle_id"`
+	Title                 string       `json:"title"`
+	Workspace             string       `json:"workspace"`
+	ParentContainerLayout string       `json:"parent_container_layout"`
+	RootContainerLayout   string       `json:"root_container_layout"`
+	Frame                 *WindowFrame `json:"frame,omitempty"`
 }
 
 type MonitorLayout struct {

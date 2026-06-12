@@ -41,14 +41,18 @@ var saveCmd = &cobra.Command{
 
 		var entries []profile.WindowEntry
 		for _, w := range windows {
-			entries = append(entries, profile.WindowEntry{
+			entry := profile.WindowEntry{
 				AppName:               w.AppName,
 				AppBundle:             w.AppBundle,
 				Title:                 w.WindowTitle,
 				Workspace:             w.Workspace,
 				ParentContainerLayout: w.ParentContainerLayout,
 				RootContainerLayout:   w.RootContainerLayout,
-			})
+			}
+			if f, err := aerospace.GetWindowFrame(w.WindowID); err == nil {
+				entry.Frame = &profile.WindowFrame{X: f.X, Y: f.Y, W: f.W, H: f.H}
+			}
+			entries = append(entries, entry)
 		}
 
 		p := &profile.Profile{

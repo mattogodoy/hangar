@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +19,13 @@ type Window struct {
 	WindowLayout          string `json:"window-layout"`
 	ParentContainerLayout string `json:"window-parent-container-layout"`
 	RootContainerLayout   string `json:"workspace-root-container-layout"`
+}
+
+type Frame struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	W float64 `json:"w"`
+	H float64 `json:"h"`
 }
 
 type Monitor struct {
@@ -54,6 +63,47 @@ func ListWindows() ([]Window, error) {
 		return nil, fmt.Errorf("parsing window list: %w", err)
 	}
 	return windows, nil
+}
+
+func ListWindowsByWorkspace(workspace string) ([]Window, error) {
+	out, err := run(
+		"list-windows", "--workspace", workspace, "--json",
+		"--format", "%{window-id} %{app-name} %{app-bundle-id} %{window-title} %{window-parent-container-layout} %{workspace-root-container-layout}",
+	)
+	if err != nil {
+		return nil, err
+	}
+	var windows []Window
+	if err := json.Unmarshal(out, &windows); err != nil {
+		return nil, fmt.Errorf("parsing window list: %w", err)
+	}
+	return windows, nil
+}
+
+var frameRe = regexp.MustCompile(`x:([0-9.-]+)\s+y:([0-9.-]+)\s+w:([0-9.-]+)\s+h:([0-9.-]+)`)
+
+func GetWindowFrame(windowID int) (*Frame, error) {
+	out, err := run("debug-windows", "--window-id", fmt.Sprintf("%d", windowID))
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "\"AXFrame\"") {
+			continue
+		}
+		if strings.Contains(line, "null") || strings.Contains(line, "AxIgnored") || strings.Contains(line, "AxFailed") {
+			continue
+		}
+		m := frameRe.FindStringSubmatch(line)
+		if m != nil {
+			x, _ := strconv.ParseFloat(m[1], 64)
+			y, _ := strconv.ParseFloat(m[2], 64)
+			w, _ := strconv.ParseFloat(m[3], 64)
+			h, _ := strconv.ParseFloat(m[4], 64)
+			return &Frame{X: x, Y: y, W: w, H: h}, nil
+		}
+	}
+	return nil, fmt.Errorf("no AXFrame found for window %d", windowID)
 }
 
 func ListMonitors() ([]Monitor, error) {
@@ -126,5 +176,15 @@ func TryJoinWith(windowID int, directions ...string) error {
 
 func FlattenWorkspaceTree(workspace string) error {
 	_, err := run("flatten-workspace-tree", "--workspace", workspace)
+	return err
+}
+
+func MoveWindow(windowID int, direction string) error {
+	_, err := run("move", "--window-id", fmt.Sprintf("%d", windowID), direction)
+	return err
+}
+
+func ResizeWindow(windowID int, dimension string, value int) error {
+	_, err := run("resize", "--window-id", fmt.Sprintf("%d", windowID), dimension, fmt.Sprintf("%d", value))
 	return err
 }

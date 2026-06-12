@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 
 	"github.com/mattogodoy/hangar/internal/aerospace"
@@ -13,6 +15,8 @@ type matchedWindow struct {
 	saved   profile.WindowEntry
 	current aerospace.Window
 }
+
+const tempWorkspace = "hangar-tmp"
 
 var restoreCmd = &cobra.Command{
 	Use:   "restore <profile-name>",
@@ -82,7 +86,7 @@ var restoreCmd = &cobra.Command{
 		}
 		fmt.Printf("Moved %d windows (%d saved windows had no current match)\n", moved, skipped)
 
-		// Phase 4: restore layout tree per workspace
+		// Phase 4: restore layout tree, order, and sizes per workspace
 		wsWindows := make(map[string][]matchedWindow)
 		for _, m := range matches {
 			wsWindows[m.saved.Workspace] = append(wsWindows[m.saved.Workspace], m)
@@ -99,13 +103,17 @@ var restoreCmd = &cobra.Command{
 	},
 }
 
+// rootNode represents a root-level element in the workspace tree:
+// either a single window or a sub-container group.
+type rootNode struct {
+	windowIDs []int
+	layout    string // only set for sub-groups (differs from root layout)
+	pos       float64
+}
+
 func restoreWorkspaceLayout(workspace string, matches []matchedWindow) error {
 	if len(matches) == 0 {
 		return nil
-	}
-
-	if err := aerospace.FlattenWorkspaceTree(workspace); err != nil {
-		return fmt.Errorf("flatten: %w", err)
 	}
 
 	rootLayout := matches[0].saved.RootContainerLayout
@@ -113,7 +121,7 @@ func restoreWorkspaceLayout(workspace string, matches []matchedWindow) error {
 		return nil
 	}
 
-	// Separate floating windows — they're handled last
+	// Separate floating windows
 	var tiling []matchedWindow
 	var floating []matchedWindow
 	for _, m := range matches {
@@ -124,78 +132,75 @@ func restoreWorkspaceLayout(workspace string, matches []matchedWindow) error {
 		}
 	}
 
+	// Build root-level nodes: individual windows at root + sub-groups.
+	// Each node has a position from the saved frame data for ordering.
+	nodes := buildRootNodes(tiling, rootLayout)
+
+	// Sort by saved position to establish desired visual order
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].pos < nodes[j].pos
+	})
+
+	// Flatten the workspace to start clean
+	if err := aerospace.FlattenWorkspaceTree(workspace); err != nil {
+		return fmt.Errorf("flatten: %w", err)
+	}
+
+	// Establish correct visual order by reinserting windows.
+	// Windows moved into a workspace are placed at the RIGHT edge,
+	// so we keep the leftmost window and bring the rest back in order.
+	allIDs := allWindowIDs(nodes)
+	if len(allIDs) > 1 {
+		for _, wid := range allIDs[1:] {
+			aerospace.MoveWindowToWorkspace(wid, tempWorkspace)
+		}
+		for _, wid := range allIDs[1:] {
+			aerospace.MoveWindowToWorkspace(wid, workspace)
+		}
+	}
+
 	// Set root container layout
-	if len(tiling) > 0 {
-		if err := aerospace.SetLayout(tiling[0].current.WindowID, rootLayout); err != nil {
-			return fmt.Errorf("set root layout: %w", err)
-		}
+	if len(allIDs) > 0 {
+		aerospace.SetLayout(allIDs[0], rootLayout)
 	}
 
-	// Find groups of consecutive windows with a different parent layout (sub-containers).
-	type subGroup struct {
-		windowIDs []int
-		layout    string
-	}
-	var groups []subGroup
-	var currentGroup *subGroup
-
-	for _, m := range tiling {
-		parentLayout := m.saved.ParentContainerLayout
-		if parentLayout == rootLayout {
-			if currentGroup != nil {
-				groups = append(groups, *currentGroup)
-				currentGroup = nil
-			}
-			continue
-		}
-		if currentGroup != nil && currentGroup.layout == parentLayout {
-			currentGroup.windowIDs = append(currentGroup.windowIDs, m.current.WindowID)
-		} else {
-			if currentGroup != nil {
-				groups = append(groups, *currentGroup)
-			}
-			currentGroup = &subGroup{
-				windowIDs: []int{m.current.WindowID},
-				layout:    parentLayout,
-			}
-		}
-	}
-	if currentGroup != nil {
-		groups = append(groups, *currentGroup)
-	}
-
-	// Reconstruct sub-containers using join-with.
-	// After flatten, windows are children of the root in tree order.
-	// join-with creates a new parent container for a window and its neighbor.
-	// We try both axis directions since visual position isn't guaranteed.
-	for _, g := range groups {
-		if len(g.windowIDs) < 2 {
-			if err := aerospace.SetLayout(g.windowIDs[0], g.layout); err != nil {
-				fmt.Printf("  warn: layout for window %d: %v\n", g.windowIDs[0], err)
+	// Reconstruct sub-containers.
+	// The ordering step above already placed sub-group windows adjacent to each other
+	// (since they come from the same node in allWindowIDs), so we just join them.
+	for _, n := range nodes {
+		if n.layout == "" || len(n.windowIDs) < 2 {
+			if n.layout != "" && len(n.windowIDs) == 1 {
+				aerospace.SetLayout(n.windowIDs[0], n.layout)
 			}
 			continue
 		}
 
-		directions := joinDirections(rootLayout)
-
-		// Join the first window with its neighbor to create a sub-container
-		if err := aerospace.TryJoinWith(g.windowIDs[0], directions...); err != nil {
-			fmt.Printf("  warn: %v\n", err)
-			continue
+		// Join adjacent sub-group windows into a sub-container
+		dir := "right"
+		if strings.HasPrefix(rootLayout, "v_") {
+			dir = "down"
 		}
-
-		// Join remaining windows into the sub-container
-		for _, wid := range g.windowIDs[2:] {
-			if err := aerospace.TryJoinWith(wid, directions...); err != nil {
-				fmt.Printf("  warn: %v\n", err)
+		if err := aerospace.JoinWith(n.windowIDs[0], dir); err != nil {
+			opposite := "left"
+			if dir == "down" {
+				opposite = "up"
+			}
+			if err2 := aerospace.JoinWith(n.windowIDs[0], opposite); err2 != nil {
+				fmt.Printf("  warn: join-with failed for window %d\n", n.windowIDs[0])
+				continue
 			}
 		}
 
-		// Set the sub-container's layout
-		if err := aerospace.SetLayout(g.windowIDs[0], g.layout); err != nil {
-			fmt.Printf("  warn: sub-container layout: %v\n", err)
+		for i := 2; i < len(n.windowIDs); i++ {
+			aerospace.TryJoinWith(n.windowIDs[i], "left", "right", "up", "down")
 		}
+
+		aerospace.SetLayout(n.windowIDs[0], n.layout)
 	}
+
+	// Restore window sizes (run twice — resizing one window shifts neighbors)
+	restoreWindowSizes(tiling, rootLayout)
+	restoreWindowSizes(tiling, rootLayout)
 
 	// Handle floating windows
 	for _, m := range floating {
@@ -207,11 +212,108 @@ func restoreWorkspaceLayout(workspace string, matches []matchedWindow) error {
 	return nil
 }
 
-func joinDirections(rootLayout string) []string {
-	if strings.HasPrefix(rootLayout, "v_") {
-		return []string{"up", "down"}
+func buildRootNodes(tiling []matchedWindow, rootLayout string) []rootNode {
+	var nodes []rootNode
+
+	// Track which windows belong to sub-groups
+	subGroupWindows := make(map[int]bool)
+	subGroups := make(map[string]*rootNode)
+
+	for _, m := range tiling {
+		pl := m.saved.ParentContainerLayout
+		if pl == rootLayout {
+			continue
+		}
+		subGroupWindows[m.current.WindowID] = true
+		g, ok := subGroups[pl]
+		if !ok {
+			g = &rootNode{layout: pl, pos: math.MaxFloat64}
+			subGroups[pl] = g
+		}
+		g.windowIDs = append(g.windowIDs, m.current.WindowID)
+		if m.saved.Frame != nil {
+			p := posFromFrame(m.saved.Frame, rootLayout)
+			if p < g.pos {
+				g.pos = p
+			}
+		}
 	}
-	return []string{"left", "right"}
+
+	// Root-level individual windows
+	for _, m := range tiling {
+		if subGroupWindows[m.current.WindowID] {
+			continue
+		}
+		pos := 0.0
+		if m.saved.Frame != nil {
+			pos = posFromFrame(m.saved.Frame, rootLayout)
+		}
+		nodes = append(nodes, rootNode{
+			windowIDs: []int{m.current.WindowID},
+			pos:       pos,
+		})
+	}
+
+	// Add sub-groups as single nodes
+	for _, g := range subGroups {
+		nodes = append(nodes, *g)
+	}
+
+	return nodes
+}
+
+func posFromFrame(f *profile.WindowFrame, layout string) float64 {
+	if strings.HasPrefix(layout, "v_") {
+		return f.Y
+	}
+	return f.X
+}
+
+func allWindowIDs(nodes []rootNode) []int {
+	var ids []int
+	for _, n := range nodes {
+		ids = append(ids, n.windowIDs...)
+	}
+	return ids
+}
+
+func restoreWindowSizes(tiling []matchedWindow, rootLayout string) {
+	// First pass: set sizes along the root container axis.
+	// In h_ root: set width for each root-level node (windows and sub-groups).
+	// In v_ root: set height for each root-level node.
+	resized := make(map[int]bool)
+	for _, m := range tiling {
+		if m.saved.Frame == nil || resized[m.current.WindowID] {
+			continue
+		}
+		if strings.HasPrefix(rootLayout, "h_") {
+			w := int(m.saved.Frame.W) + 5
+			aerospace.ResizeWindow(m.current.WindowID, "width", w)
+		} else if strings.HasPrefix(rootLayout, "v_") {
+			h := int(m.saved.Frame.H) + 5
+			aerospace.ResizeWindow(m.current.WindowID, "height", h)
+		}
+		resized[m.current.WindowID] = true
+	}
+
+	// Second pass: set sizes along the sub-container axis (the other dimension).
+	// Windows in sub-containers need their size set within the sub-container too.
+	for _, m := range tiling {
+		if m.saved.Frame == nil {
+			continue
+		}
+		pl := m.saved.ParentContainerLayout
+		if pl == rootLayout {
+			continue
+		}
+		if strings.HasPrefix(pl, "h_") {
+			w := int(m.saved.Frame.W) + 5
+			aerospace.ResizeWindow(m.current.WindowID, "width", w)
+		} else if strings.HasPrefix(pl, "v_") {
+			h := int(m.saved.Frame.H) + 5
+			aerospace.ResizeWindow(m.current.WindowID, "height", h)
+		}
+	}
 }
 
 func findBestMatch(current []aerospace.Window, saved profile.WindowEntry, claimed map[int]bool) *aerospace.Window {
